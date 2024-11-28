@@ -38,5 +38,5 @@ echo Environment setup complete!
 pause
 
 ------------------------------------------------------------------------------------------
-
+WARNING WILL NOT WORK WITH NORMAL CODE: ONLY MATHEMATICS
 
