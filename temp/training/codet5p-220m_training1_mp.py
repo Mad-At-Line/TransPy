@@ -1,15 +1,14 @@
 import os
 import torch
-import subprocess
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, Seq2SeqTrainingArguments, Seq2SeqTrainer, EarlyStoppingCallback, DataCollatorForSeq2Seq
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, Seq2SeqTrainingArguments, Seq2SeqTrainer, DataCollatorForSeq2Seq
 from datasets import load_dataset
+from functools import partial
 
 if __name__ == '__main__':
     # Set paths
     model_checkpoint = "Salesforce/codet5p-220m"
-    model_output_dir = r"C:\Users\mythi\OneDrive\Desktop\PLease_work_models"
-    dataset_path = r"C:\Users\mythi\OneDrive\Desktop\ai_training_database"
-    eval_dataset_path = r"C:\Users\mythi\OneDrive\Desktop\eval_dataset"
+    model_output_dir = r"C:\Users\mythi\OneDrive\Desktop\V2_TransPy\models_testing"
+    train_dataset_path = r"C:\Users\mythi\OneDrive\Desktop\active_training"
 
     # Load tokenizer and model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -20,75 +19,63 @@ if __name__ == '__main__':
     # Enable gradient checkpointing to save memory
     model.gradient_checkpointing_enable()
 
-    # Load the training and evaluation datasets
-    dataset = load_dataset("json", data_files={"train": os.path.join(dataset_path, "*.jsonl")})
-    eval_dataset = load_dataset("json", data_files={"eval": os.path.join(eval_dataset_path, "*.jsonl")})
+    # Load the training dataset
+    train_dataset = load_dataset("json", data_files={"train": os.path.join(train_dataset_path, "*.jsonl")})
 
-    # Calculate average token length of dataset
-    def calculate_average_token_length(dataset, tokenizer):
-        total_length = 0
-        total_examples = 0
-
-        for example in dataset:
-            input_tokens = tokenizer(example["input"], truncation=False)["input_ids"]
-            output_tokens = tokenizer(example["output"], truncation=False)["input_ids"]
-            total_length += len(input_tokens) + len(output_tokens)
-            total_examples += 1
-
-        average_length = total_length / (2 * total_examples)  # Average for both input and output
-        return average_length
-
-    average_token_length = calculate_average_token_length(dataset["train"], tokenizer)
-    print(f"Average token length: {average_token_length}")
-
-    # Tokenization function for dataset
-    def preprocess_function(examples):
-        model_inputs = tokenizer(examples["input"], max_length=768, truncation=True, padding="max_length")
-        labels = tokenizer(examples["output"], max_length=768, truncation=True, padding="max_length")
+    # Preprocessing function for tokenization
+    def preprocess_function(examples, model_checkpoint):
+        local_tokenizer = AutoTokenizer.from_pretrained(model_checkpoint, trust_remote_code=True)
+        model_inputs = local_tokenizer(examples["input_code"], max_length=512, truncation=True, padding="max_length")
+        labels = local_tokenizer(examples["output_code"], max_length=512, truncation=True, padding="max_length")
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
 
-    # Preprocess the datasets
-    tokenized_datasets = dataset.map(preprocess_function, batched=True, num_proc=1)
-    tokenized_eval_dataset = eval_dataset.map(preprocess_function, batched=True, num_proc=1)
+    # Tokenize datasets with multiprocessing
+    print("Tokenizing training dataset...")
+    tokenized_train_dataset = train_dataset["train"].map(
+        partial(preprocess_function, model_checkpoint=model_checkpoint),
+        batched=True,
+        num_proc=4
+    )
 
     # Set training arguments
     training_args = Seq2SeqTrainingArguments(
         output_dir=model_output_dir,
-        evaluation_strategy="steps",
-        eval_steps=1200,
-        learning_rate=2.7e-5,
-        per_device_train_batch_size=4,
-        per_device_eval_batch_size=4,
-        gradient_accumulation_steps=4,
-        num_train_epochs=4,
+        learning_rate=3e-5,
+        per_device_train_batch_size=2,  # Reduced batch size for 6GB VRAM
+        gradient_accumulation_steps=16,  # Simulates effective batch size of 32
+        num_train_epochs=8,  # Adequate epochs for small dataset
         weight_decay=0.01,
-        save_total_limit=2,
-        save_steps=1200,
+        save_total_limit=2,  # Save fewer checkpoints
+        save_steps=1000,
         logging_dir='./logs',
-        logging_steps=200,
+        logging_steps=100,
         push_to_hub=False,
-        fp16=True,
-        warmup_steps=1500,
+        fp16=True,  # Mixed precision training for GPU efficiency
+        warmup_steps=500,  # Adjusted warmup steps for smaller dataset
         lr_scheduler_type="cosine",
-        load_best_model_at_end=True,
-        label_smoothing_factor=0.05,
+        label_smoothing_factor=0.1,
         max_grad_norm=1.0
     )
 
-    # Initialize Seq2SeqTrainer with EarlyStoppingCallback
+    # Initialize data collator
+    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+
+    # Initialize Seq2SeqTrainer
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized_datasets["train"],
-        eval_dataset=tokenized_eval_dataset["eval"],
-        data_collator=DataCollatorForSeq2Seq(tokenizer, model=model),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=5)]
+        train_dataset=tokenized_train_dataset,
+        data_collator=data_collator,
+        tokenizer=tokenizer
     )
 
     # Train the model
+    print("Starting training...")
     trainer.train()
 
-    # Save the trained model
+    # Save the trained model and tokenizer
     trainer.save_model(model_output_dir)
     tokenizer.save_pretrained(model_output_dir)
+    print(f"Model and tokenizer saved to {model_output_dir}")
+
